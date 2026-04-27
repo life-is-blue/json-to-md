@@ -234,9 +234,21 @@ def observe_with_chunking(chunks: list[str]) -> str:
     return call_engine(combined, SOUL_SYSTEM)
 
 
+def _get_required_fields(entry_text: str) -> list[str]:
+    """Determine required fields based on type: tag in entry."""
+    m = re.search(r'\|\s*type:\s*([\w-]+)', entry_text)
+    entry_type = m.group(1) if m else "trap"
+    if entry_type == "correction":
+        return ["**误**", "**正**", "**因**"]
+    if entry_type == "method":
+        return ["**法**", "**步**", "**用**"]
+    # trap / toolchain / arch / unknown → original fields
+    return ["**坑**", "**因**", "**法**"]
+
+
 def parse_lesson_entries(raw: str, target_date) -> list[dict]:
     """Parse LLM output into structured lesson entries.
-    Each entry must have ## slug header + **坑**/**因**/**法** triple."""
+    Each entry must have ## slug header + type-appropriate field triple."""
     entries = []
     parts = re.split(r'(?=^## [\w-]+$)', raw.strip(), flags=re.M)
     for part in parts:
@@ -247,8 +259,8 @@ def parse_lesson_entries(raw: str, target_date) -> list[dict]:
         if not m:
             continue
         slug = m.group(1)
-        # Triple validation: all three fields required (Codex review feedback)
-        missing = [f for f in ("**坑**", "**因**", "**法**") if f not in part]
+        # Type-aware triple validation
+        missing = [f for f in _get_required_fields(part) if f not in part]
         if missing:
             print(f"Lessons: skipping {slug}, missing: {', '.join(missing)}", file=sys.stderr)
             continue
@@ -274,6 +286,11 @@ def lessons_quality_gate(entries: list[dict]) -> list[dict]:
         if any(re.search(p, text) for p in REJECT_PATTERNS):
             print(f"Lessons quality gate rejected: {entry['slug']}", file=sys.stderr)
             continue
+        # correction without 因 is noise — root cause is the core value of a correction
+        if 'type: correction' in text:
+            if '**因**' not in text:
+                print(f"Lessons quality gate rejected (correction without 因): {entry['slug']}", file=sys.stderr)
+                continue
         kept.append(entry)
     return kept
 

@@ -158,6 +158,50 @@ class TestParseLessonEntries(unittest.TestCase):
         entries = parse_lesson_entries("NONE", "2026-04-20")
         self.assertEqual(len(entries), 0)
 
+    def test_correction_format(self):
+        raw = (
+            "## naming-style-correction\n"
+            "> 2026-04-26 | pk: naming-consistency | area: docs | type: correction\n\n"
+            "**误**: AI 用混合命名（ai_prompts.py + ai-report.py）\n"
+            "**正**: 统一用 snake_case（ai_report.py）\n"
+            "**因**: 初始命名随意，后续文件沿用了不同约定\n"
+        )
+        entries = parse_lesson_entries(raw, "2026-04-26")
+        self.assertEqual(len(entries), 1)
+
+    def test_correction_without_cause_rejected(self):
+        raw = (
+            "## bad-correction\n"
+            "> 2026-04-26 | pk: test | area: backend | type: correction\n\n"
+            "**误**: did X\n"
+            "**正**: should do Y\n"
+        )
+        entries = parse_lesson_entries(raw, "2026-04-26")
+        self.assertEqual(len(entries), 0)
+
+    def test_method_format(self):
+        raw = (
+            "## plan-before-act-method\n"
+            "> 2026-04-26 | pk: plan-before-act | area: arch | type: method\n\n"
+            "**法**: 谋定而后动\n"
+            "**步**: 1) 探索代码库 → 2) 对齐需求 → 3) 出计划 → 4) 执行 → 5) 验证\n"
+            "**用**: 非平凡任务（涉及 >3 个文件或架构变更）\n"
+        )
+        entries = parse_lesson_entries(raw, "2026-04-26")
+        self.assertEqual(len(entries), 1)
+
+    def test_old_format_still_works(self):
+        """Entries without type: field must still parse with 坑/因/法."""
+        raw = (
+            "## old-lesson\n"
+            "> 2026-04-18 | pk: old-pattern\n\n"
+            "**坑**: something broke\n"
+            "**因**: root cause\n"
+            "**法**: the fix\n"
+        )
+        entries = parse_lesson_entries(raw, "2026-04-26")
+        self.assertEqual(len(entries), 1)
+
 
 class TestParseGeneYaml(unittest.TestCase):
     def test_basic_fields(self):
