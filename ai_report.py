@@ -796,6 +796,69 @@ def apply_ops(content: str, ops: list[tuple[str, str, str]]) -> str:
     return content
 
 
+def _auto_create_gene(genes_dir: Path, pk: str, area: str, pk_entries_text: list[str], today: date):
+    """Auto-create Gene scaffold from LESSONS.md entries sharing a pk.
+
+    If a type:method entry exists for this pk, extract approach from its **步** field.
+    Otherwise create a scaffold with <!-- needs-review --> marker.
+    """
+    gene_dir = genes_dir / pk
+    if gene_dir.exists():
+        return  # idempotent
+
+    # Check for method entries
+    method_approach = None
+    method_desc = None
+    for text in pk_entries_text:
+        if 'type: method' in text:
+            fa_m = re.search(r'\*\*法\*\*[：:]\s*(.+)', text)
+            bu_m = re.search(r'\*\*步\*\*[：:]\s*(.+?)(?=\n\*\*|\Z)', text, re.S)
+            if fa_m:
+                method_desc = fa_m.group(1).strip()
+            if bu_m:
+                method_approach = bu_m.group(1).strip()
+
+    description = method_desc or f"<!-- TODO: needs human review — auto-scaffolded from {len(pk_entries_text)} entries -->"
+    needs_review = method_desc is None
+
+    # Create directories
+    gene_dir.mkdir(parents=True, exist_ok=True)
+    (gene_dir / "variants").mkdir(exist_ok=True)
+
+    # Write gene.yaml (atomic)
+    gene_yaml = (
+        f"gene_id: GEN-{today.strftime('%Y%m%d')}-{pk[:3]}\n"
+        f"name: {pk}\n"
+        f"description: {description}\n"
+        f"created: {today.isoformat()}\n"
+        f"source_type: learning\n"
+        f"context_tags: {area}\n"
+        f"applicable_areas: {area}\n"
+        f"usage_count: 0\n"
+        f"decay_window_days: 90\n"
+    )
+    tmp = (gene_dir / "gene.yaml.tmp")
+    tmp.write_text(gene_yaml, encoding="utf-8")
+    os.replace(tmp, gene_dir / "gene.yaml")
+
+    # Write variants/v1.yaml (atomic)
+    approach = method_approach or "\n".join(f"  {i+1}. (from {slug})" for i, slug in enumerate(
+        re.findall(r'^## ([\w-]+)', '\n'.join(pk_entries_text), re.M)[:5]
+    ))
+    v1_yaml = (
+        f"version: 1\n"
+        f"created: {today.isoformat()}\n"
+        f"approach: |\n"
+        f"  {approach}\n"
+    )
+    tmp_v = (gene_dir / "variants" / "v1.yaml.tmp")
+    tmp_v.write_text(v1_yaml, encoding="utf-8")
+    os.replace(tmp_v, gene_dir / "variants" / "v1.yaml")
+
+    marker = " [needs-review]" if needs_review else ""
+    print(f"Gene auto-created: {pk} (area={area}){marker}", file=sys.stderr)
+
+
 def cmd_distill(args):
     """Distill SOUL.md observations + LESSONS.md lessons into MEMORY.md rules."""
     soul_path = Path(args.soul)
@@ -870,23 +933,54 @@ def cmd_distill(args):
     else:
         print(f"Distill: {total} entries marked absorbed (NOP)", file=sys.stderr)
 
-    # Phase 6: Gene promotion suggestions — pk≥3 days → candidate
-    if pattern_counts and lessons_path.exists():
-        lesson_pks = {}  # pk → area
-        content = lessons_path.read_text(encoding="utf-8")
-        for entry in re.split(r'(?=^## [\w-])', content, flags=re.M):
-            pk_m = re.search(r'pk:\s*([\w-]+)', entry)
-            area_m = re.search(r'area:\s*([\w-]+)', entry)
-            if pk_m:
-                lesson_pks[pk_m.group(1)] = area_m.group(1) if area_m else "unknown"
-        gene_candidates = [(pk, cnt, lesson_pks.get(pk, "unknown"))
-                          for pk, cnt in pattern_counts.items()
-                          if pk in lesson_pks and cnt >= 3]
-        if gene_candidates:
-            print(f"Gene promotion candidates ({len(gene_candidates)}):", file=sys.stderr)
-            for pk, cnt, area in gene_candidates:
-                print(f"  → {pk} ({cnt} days, area={area}) — run: scripts/extract-gene.sh {pk}",
-                      file=sys.stderr)
+    # Phase 6: Gene auto-extraction — pk≥3 days → create gene.yaml
+    if pattern_counts:
+        genes_dir = Path(args.logs) / ".genes"
+        lesson_text_by_pk = {}  # pk → list of entry texts
+        if lessons_path.exists():
+            lc = lessons_path.read_text(encoding="utf-8")
+            for entry in re.split(r'(?=^## [\w-])', lc, flags=re.M):
+                pk_m = re.search(r'pk:\s*([\w-]+)', entry)
+                if pk_m:
+                    lesson_text_by_pk.setdefault(pk_m.group(1), []).append(entry)
+
+        for pk, cnt in pattern_counts.items():
+            if cnt < 3:
+                continue
+            area_m = None
+            for text in lesson_text_by_pk.get(pk, []):
+                area_m = re.search(r'area:\s*([\w-]+)', text)
+                if area_m:
+                    break
+            area = area_m.group(1) if area_m else "unknown"
+            entries = lesson_text_by_pk.get(pk, [])
+            if entries:
+                _auto_create_gene(genes_dir, pk, area, entries, date.today())
+
+    # Phase 7: MEMORY.md health check (mechanical)
+    if memory_path.exists():
+        mem_counts = _count_memory_rules(memory_path)
+        total_rules = sum(mem_counts.values())
+        warnings = []
+
+        if total_rules > 100:
+            warnings.append(f"MEMORY.md 规模膨胀: {total_rules} 条规则 (>100)")
+
+        prefer_count = mem_counts.get("PREFER", 0)
+        must_count = mem_counts.get("MUST", 0)
+        if prefer_count > max(15, int(must_count * 1.5)):
+            warnings.append(f"PREFER ({prefer_count}) 显著多于 MUST ({must_count})，考虑升级强信号")
+
+        unabsorbed_count = len(extract_unabsorbed_lessons(lessons_path))
+        if unabsorbed_count > DISTILL_MIN_ENTRIES * 3:
+            warnings.append(f"LESSONS 积压 {unabsorbed_count} 条未吸收")
+
+        context_count = mem_counts.get("CONTEXT", 0)
+        if context_count < 2 and total_rules > 20:
+            warnings.append(f"CONTEXT section 仅 {context_count} 条，考虑补充环境约束")
+
+        for w in warnings:
+            print(f"Distill health: {w}", file=sys.stderr)
 
 
 def _mark_lessons_absorbed(lessons_path: Path, unabsorbed_lessons: list[tuple[str, str]]):
